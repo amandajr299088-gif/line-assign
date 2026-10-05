@@ -164,6 +164,7 @@
 
   <div id="bar" class="bar" style="display:none">
     <div id="barStatus" class="bar-status">正在連線到管理頁...</div>
+    <button id="pipButton" onclick="togglePip()">📌 開啟懸浮視窗</button>
     <button id="notifyButton" onclick="enableNotification()">啟用桌面通知</button>
     <button onclick="resetUrl()">更換網址</button>
   </div>
@@ -193,6 +194,17 @@
     let flashOn = false;
     let connected = false;
     let lastStatus = { total: 0, warning: 0, overdue: 0 };
+
+    // 不在此分頁、且仍有待分派案件時，每隔幾分鐘再次發出桌面通知
+    const REMIND_EVERY_MINUTES = 5;
+
+    let lastNotifyAt = 0;
+    let wasAway = false;
+
+    // 懸浮視窗（永遠顯示在所有視窗最上層）
+    let pipWindow = null;
+    let pipFlash = false;
+    let pipAlertText = '';
 
 
     /* ========================================
@@ -265,6 +277,7 @@
       frame.src = url;
 
       updateNotifyButton();
+      updatePipButton();
       drawFavicon(0, false);
 
       // 一段時間內沒收到管理頁的訊息 → 主動告知，不讓使用者以為提醒有在運作
@@ -306,6 +319,7 @@
       if (!connected) {
         connected = true;
         showHint('');
+        renderPip();
       }
 
       if (data.event === 'status') {
@@ -359,6 +373,8 @@
       if (total === 0) {
         stopFlash();
       }
+
+      renderPip();
     }
 
 
@@ -396,6 +412,10 @@
 
       startFlash(message.flash);
 
+      pipAlertText = message.flash;
+      pipFlash = true;
+      renderPip();
+
       showDesktopNotification(
         message.title,
         message.body,
@@ -432,6 +452,11 @@
       }
 
       document.title = currentTitle;
+
+      if (pipFlash) {
+        pipFlash = false;
+        renderPip();
+      }
     }
 
 
@@ -583,13 +608,15 @@
         return;
       }
 
+      lastNotifyAt = Date.now();
+
       try {
         const notification = new Notification(title, {
           body: body,
           tag: 'lineAssignment-' + tag,
           renotify: true,
-          // 逾時通知需手動關閉，不會自己消失
-          requireInteraction: tag === 'overdue'
+          // 通知會停留在螢幕上，需手動關閉，不會幾秒後自己消失
+          requireInteraction: tag !== 'test'
         });
 
         notification.onclick = function() {
@@ -599,6 +626,225 @@
       } catch (error) {
         console.log('桌面通知顯示失敗：', error);
       }
+    }
+
+
+    /* ========================================
+       持續提醒
+       不在此分頁、且仍有待分派案件時，每隔幾分鐘再通知一次，直到處理完為止
+       ======================================== */
+
+    setInterval(function() {
+      if (!connected) {
+        return;
+      }
+
+      const away = document.hidden || !document.hasFocus();
+
+      // 剛離開此分頁：從現在開始計時
+      if (away && !wasAway) {
+        lastNotifyAt = Date.now();
+      }
+
+      wasAway = away;
+
+      if (
+        !away ||
+        lastStatus.total === 0 ||
+        Date.now() - lastNotifyAt < REMIND_EVERY_MINUTES * 60000
+      ) {
+        return;
+      }
+
+      const hasOverdue = lastStatus.overdue > 0;
+
+      const title = hasOverdue
+        ? `仍有 ${lastStatus.overdue} 筆案件已逾時未分派`
+        : `仍有 ${lastStatus.total} 筆案件待分派`;
+
+      pipAlertText = hasOverdue
+        ? `🔴 仍有 ${lastStatus.overdue} 筆逾時！`
+        : `🔔 仍有 ${lastStatus.total} 筆待分派`;
+
+      pipFlash = true;
+      renderPip();
+
+      startFlash(pipAlertText);
+
+      lastNotifyAt = Date.now();
+
+      showDesktopNotification(
+        title,
+        hasOverdue
+          ? `待分派共 ${lastStatus.total} 筆，請優先處理逾時案件。`
+          : '請回到待分派管理頁指派業務。',
+        'remind'
+      );
+    }, 30000);
+
+
+    /* ========================================
+       懸浮視窗
+       一個永遠浮在最上層的小視窗：切到其他分頁、其他程式都看得到。
+       有新詢價或逾時時會變色並閃爍。
+       ======================================== */
+
+    function isPipSupported() {
+      return 'documentPictureInPicture' in window;
+    }
+
+
+    function updatePipButton() {
+      const button = document.getElementById('pipButton');
+
+      if (!isPipSupported()) {
+        button.style.display = 'none';
+        return;
+      }
+
+      button.textContent = pipWindow
+        ? '✕ 關閉懸浮視窗'
+        : '📌 開啟懸浮視窗';
+
+      button.className = pipWindow ? '' : 'primary';
+    }
+
+
+    function togglePip() {
+      if (!isPipSupported()) {
+        return;
+      }
+
+      if (pipWindow) {
+        pipWindow.close();
+        return;
+      }
+
+      documentPictureInPicture
+        .requestWindow({ width: 300, height: 190 })
+        .then(function(opened) {
+          pipWindow = opened;
+
+          buildPip();
+          renderPip();
+          updatePipButton();
+
+          pipWindow.addEventListener('pagehide', function() {
+            pipWindow = null;
+            updatePipButton();
+          });
+        })
+        .catch(function(error) {
+          console.log('懸浮視窗開啟失敗：', error);
+        });
+    }
+
+
+    function buildPip() {
+      const doc = pipWindow.document;
+
+      doc.title = 'LINE@ 待分派';
+
+      const style = doc.createElement('style');
+
+      style.textContent = `
+        html, body { height: 100%; margin: 0; }
+
+        body {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 4px;
+          padding: 10px;
+          box-sizing: border-box;
+          text-align: center;
+          font-family: Arial, "Microsoft JhengHei", sans-serif;
+          color: white;
+          background: #475569;
+          transition: background 0.2s;
+        }
+
+        body.clear { background: #059669; }
+        body.normal { background: #2563eb; }
+        body.warning { background: #b45309; }
+        body.danger { background: #dc2626; }
+
+        body.flash { animation: flash 1s steps(1) infinite; }
+
+        @keyframes flash {
+          50% { background: #111827; }
+        }
+
+        #big { font-size: 54px; font-weight: 800; line-height: 1; }
+        #text { font-size: 14px; font-weight: 700; }
+        #alert { font-size: 15px; font-weight: 800; min-height: 20px; }
+
+        button {
+          margin-top: 4px;
+          border: 0;
+          border-radius: 8px;
+          padding: 7px 16px;
+          font-size: 13px;
+          font-weight: 800;
+          font-family: inherit;
+          cursor: pointer;
+          background: white;
+          color: #172033;
+        }
+      `;
+
+      doc.head.appendChild(style);
+
+      doc.body.innerHTML = `
+        <div id="alert"></div>
+        <div id="big">…</div>
+        <div id="text"></div>
+        <button id="go">前往處理</button>
+      `;
+
+      doc.getElementById('go').onclick = function() {
+        window.focus();
+        stopFlash();
+      };
+    }
+
+
+    function renderPip() {
+      if (!pipWindow) {
+        return;
+      }
+
+      const doc = pipWindow.document;
+      const status = lastStatus;
+
+      let level = 'clear';
+      let big = '✓';
+      let text = '目前沒有待分派案件';
+
+      if (!connected) {
+        level = '';
+        big = '…';
+        text = '正在連線到管理頁';
+      } else if (status.overdue > 0) {
+        level = 'danger';
+        big = String(status.total);
+        text = `筆待分派｜其中 ${status.overdue} 筆已逾時`;
+      } else if (status.warning > 0) {
+        level = 'warning';
+        big = String(status.total);
+        text = `筆待分派｜其中 ${status.warning} 筆即將逾時`;
+      } else if (status.total > 0) {
+        level = 'normal';
+        big = String(status.total);
+        text = '筆待分派';
+      }
+
+      doc.body.className = level + (pipFlash ? ' flash' : '');
+
+      doc.getElementById('big').textContent = big;
+      doc.getElementById('text').textContent = text;
+      doc.getElementById('alert').textContent = pipFlash ? pipAlertText : '';
     }
 
 
