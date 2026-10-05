@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>LINE@ 待分派</title>
+
+  <!--
+    LINE@ 詢價待分派｜通知外殼頁
+
+    用途：
+    Apps Script 的網頁會被包在內層框架裡，無法更改瀏覽器分頁標題，也無法發出桌面通知。
+    這個外殼頁放在 GitHub Pages（一般網站），把管理頁嵌在裡面，
+    由外殼頁負責：分頁標題顯示件數與閃爍、分頁圖示顯示件數、Windows 桌面通知。
+
+    安全：
+    - 本檔案不含任何網址、金鑰或客戶資料，可放在公開的 GitHub Pages。
+    - 管理頁網址由每位使用者第一次開啟時自行貼上，只存在該台電腦的瀏覽器。
+    - 管理頁只會傳「件數」給外殼頁，不傳客戶資料。
+  -->
+
+  <style>
+    * { box-sizing: border-box; }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      font-family: Arial, "Microsoft JhengHei", sans-serif;
+      color: #172033;
+      background: #f5f7fb;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 14px;
+      background: #172033;
+      color: #e2e8f0;
+      font-size: 13px;
+      flex-wrap: wrap;
+    }
+
+    .bar-status {
+      flex: 1;
+      min-width: 160px;
+      font-weight: 700;
+    }
+
+    .bar button {
+      border: 0;
+      border-radius: 7px;
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      font-family: inherit;
+      cursor: pointer;
+      background: #334155;
+      color: #e2e8f0;
+    }
+
+    .bar button.primary {
+      background: #f59e0b;
+      color: #172033;
+    }
+
+    .bar button.ok {
+      background: #065f46;
+      color: #d1fae5;
+      cursor: default;
+    }
+
+    .hint {
+      display: none;
+      padding: 9px 14px;
+      background: #fffbeb;
+      border-bottom: 1px solid #fde68a;
+      color: #92400e;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    iframe {
+      flex: 1;
+      width: 100%;
+      border: 0;
+      background: white;
+    }
+
+    .setup {
+      max-width: 620px;
+      margin: 60px auto;
+      padding: 28px;
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 4px 18px rgba(15, 23, 42, 0.08);
+    }
+
+    .setup h1 {
+      margin: 0 0 8px 0;
+      font-size: 22px;
+    }
+
+    .setup p {
+      margin: 0 0 14px 0;
+      font-size: 14px;
+      line-height: 1.7;
+      color: #475569;
+    }
+
+    .setup input {
+      width: 100%;
+      padding: 11px 12px;
+      border: 1px solid #dbe0e8;
+      border-radius: 9px;
+      font-size: 14px;
+      font-family: inherit;
+    }
+
+    .setup button {
+      margin-top: 12px;
+      border: 0;
+      border-radius: 9px;
+      padding: 12px 20px;
+      background: #2563eb;
+      color: white;
+      font-size: 14px;
+      font-weight: 700;
+      font-family: inherit;
+      cursor: pointer;
+    }
+
+    .setup-error {
+      margin-top: 10px;
+      color: #dc2626;
+      font-size: 13px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div id="setup" class="setup" style="display:none">
+    <h1>LINE@ 詢價待分派｜首次設定</h1>
+    <p>
+      請貼上「LINE@ 詢價待分派管理」的網址（開頭為 https://script.google.com/，結尾為 /exec）。<br>
+      只需設定一次，網址只會儲存在這台電腦的瀏覽器裡。
+    </p>
+    <input
+      id="urlInput"
+      type="url"
+      placeholder="https://script.google.com/macros/s/.../exec"
+    >
+    <button onclick="saveUrl()">儲存並開啟</button>
+    <div id="setupError" class="setup-error"></div>
+  </div>
+
+  <div id="bar" class="bar" style="display:none">
+    <div id="barStatus" class="bar-status">正在連線到管理頁...</div>
+    <button id="notifyButton" onclick="enableNotification()">啟用桌面通知</button>
+    <button onclick="resetUrl()">更換網址</button>
+  </div>
+
+  <div id="hint" class="hint"></div>
+
+  <iframe
+    id="frame"
+    title="LINE@ 詢價待分派管理"
+    allow="autoplay"
+    style="display:none"
+  ></iframe>
+
+
+  <script>
+
+    const URL_STORAGE_KEY = 'lineAssignmentShellUrl';
+    const BASE_TITLE = 'LINE@ 待分派';
+
+    // 只接受來自 Google Apps Script 的訊息
+    const ALLOWED_ORIGIN =
+      /^https:\/\/([a-z0-9-]+\.)*(googleusercontent\.com|script\.google\.com)$/;
+
+    let currentTitle = BASE_TITLE;
+    let flashTimer = null;
+    let flashText = '';
+    let flashOn = false;
+    let connected = false;
+    let lastStatus = { total: 0, warning: 0, overdue: 0 };
+
+
+    /* ========================================
+       網址設定
+       ======================================== */
+
+    function readUrl() {
+      try {
+        return localStorage.getItem(URL_STORAGE_KEY) || '';
+      } catch (error) {
+        return '';
+      }
+    }
+
+
+    function isValidUrl(url) {
+      return /^https:\/\/script\.google\.com\/.+/.test(url);
+    }
+
+
+    function saveUrl() {
+      const url = document.getElementById('urlInput').value.trim();
+
+      if (!isValidUrl(url)) {
+        document.getElementById('setupError').textContent =
+          '網址格式不正確，請貼上開頭為 https://script.google.com/ 的管理頁網址。';
+
+        return;
+      }
+
+      try {
+        localStorage.setItem(URL_STORAGE_KEY, url);
+      } catch (error) {
+        document.getElementById('setupError').textContent =
+          '瀏覽器無法儲存設定，請確認未使用無痕視窗。';
+
+        return;
+      }
+
+      start(url);
+    }
+
+
+    function resetUrl() {
+      if (!confirm('確定要更換管理頁網址嗎？')) {
+        return;
+      }
+
+      try {
+        localStorage.removeItem(URL_STORAGE_KEY);
+      } catch (error) {
+        console.log(error);
+      }
+
+      location.reload();
+    }
+
+
+    /* ========================================
+       啟動
+       ======================================== */
+
+    function start(url) {
+      document.getElementById('setup').style.display = 'none';
+      document.getElementById('bar').style.display = 'flex';
+
+      const frame = document.getElementById('frame');
+
+      frame.style.display = 'block';
+      frame.src = url;
+
+      updateNotifyButton();
+      drawFavicon(0, false);
+
+      // 一段時間內沒收到管理頁的訊息 → 主動告知，不讓使用者以為提醒有在運作
+      setTimeout(function() {
+        if (!connected) {
+          showHint(
+            '⚠ 尚未收到管理頁的狀態，分頁標題與桌面通知目前不會運作。' +
+            '請確認：① 網址正確（可按右上「更換網址」）；② 管理頁已更新為最新版並發布新版本；' +
+            '③ 管理頁的存取權限為「所有人」。'
+          );
+        }
+      }, 25000);
+    }
+
+
+    function showHint(text) {
+      const hint = document.getElementById('hint');
+
+      hint.textContent = text;
+      hint.style.display = text ? 'block' : 'none';
+    }
+
+
+    /* ========================================
+       接收管理頁的訊息
+       ======================================== */
+
+    window.addEventListener('message', function(event) {
+      const data = event.data;
+
+      if (
+        !ALLOWED_ORIGIN.test(event.origin) ||
+        !data ||
+        data.source !== 'lineAssignment'
+      ) {
+        return;
+      }
+
+      if (!connected) {
+        connected = true;
+        showHint('');
+      }
+
+      if (data.event === 'status') {
+        handleStatus(data);
+      }
+
+      if (data.event === 'alert') {
+        handleAlert(data);
+      }
+    });
+
+
+    function toCount(value) {
+      const number = Number(value);
+
+      return isNaN(number) || number < 0 ? 0 : Math.floor(number);
+    }
+
+
+    function handleStatus(data) {
+      const total = toCount(data.total);
+      const warning = toCount(data.warning);
+      const overdue = toCount(data.overdue);
+
+      lastStatus = { total: total, warning: warning, overdue: overdue };
+
+      let status = '✓ 目前沒有待分派案件';
+
+      if (overdue > 0) {
+        currentTitle = `🔴 逾時 ${overdue}｜待分派 ${total}`;
+        status = `🔴 已逾時 ${overdue} 筆｜待分派共 ${total} 筆`;
+      } else if (warning > 0) {
+        currentTitle = `🟠 (${total}) ${BASE_TITLE}`;
+        status = `🟠 即將逾時 ${warning} 筆｜待分派共 ${total} 筆`;
+      } else if (total > 0) {
+        currentTitle = `(${total}) ${BASE_TITLE}`;
+        status = `待分派 ${total} 筆`;
+      } else {
+        currentTitle = BASE_TITLE;
+      }
+
+      document.getElementById('barStatus').textContent = status;
+
+      drawFavicon(total, overdue > 0);
+
+      if (!flashTimer) {
+        document.title = currentTitle;
+      }
+
+      // 已全部處理完：停止閃爍
+      if (total === 0) {
+        stopFlash();
+      }
+    }
+
+
+    function handleAlert(data) {
+      const count = toCount(data.count) || 1;
+
+      const messages = {
+        new: {
+          flash: `🔔 ${count} 筆新詢價！`,
+          title: `收到 ${count} 筆新的 LINE@ 詢價`,
+          body: '請回到待分派管理頁指派業務。'
+        },
+        warning: {
+          flash: `🟠 ${count} 筆即將逾時！`,
+          title: `有 ${count} 筆案件即將逾時`,
+          body: '已等待超過 45 分鐘，建議盡快指派。'
+        },
+        overdue: {
+          flash: `🔴 ${count} 筆已逾時！`,
+          title: `有 ${count} 筆案件已逾時未分派`,
+          body: '已超過 1 小時仍未指派業務，請優先處理。'
+        }
+      };
+
+      const message = messages[data.kind];
+
+      if (!message) {
+        return;
+      }
+
+      // 使用者正在看這個分頁時，管理頁本身已會顯示提醒，不重複打擾
+      if (!document.hidden && document.hasFocus()) {
+        return;
+      }
+
+      startFlash(message.flash);
+
+      showDesktopNotification(
+        message.title,
+        message.body,
+        data.kind
+      );
+    }
+
+
+    /* ========================================
+       分頁標題閃爍
+       ======================================== */
+
+    function startFlash(text) {
+      flashText = text;
+
+      if (flashTimer) {
+        return;
+      }
+
+      flashOn = true;
+      document.title = flashText;
+
+      flashTimer = setInterval(function() {
+        flashOn = !flashOn;
+        document.title = flashOn ? flashText : currentTitle;
+      }, 1000);
+    }
+
+
+    function stopFlash() {
+      if (flashTimer) {
+        clearInterval(flashTimer);
+        flashTimer = null;
+      }
+
+      document.title = currentTitle;
+    }
+
+
+    // 使用者回到這個分頁就停止閃爍
+    document.addEventListener('visibilitychange', function() {
+      if (!document.hidden) {
+        stopFlash();
+      }
+    });
+
+    window.addEventListener('focus', stopFlash);
+
+
+    /* ========================================
+       分頁圖示：顯示待分派件數
+       分頁開很多、標題被擠掉時，仍看得到圖示上的數字
+       ======================================== */
+
+    function drawFavicon(count, isOverdue) {
+      try {
+        const size = 64;
+        const canvas = document.createElement('canvas');
+
+        canvas.width = size;
+        canvas.height = size;
+
+        const context = canvas.getContext('2d');
+
+        context.fillStyle =
+          count === 0
+            ? '#06c755'
+            : isOverdue
+              ? '#dc2626'
+              : '#2563eb';
+
+        context.beginPath();
+        context.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2);
+        context.fill();
+
+        context.fillStyle = '#ffffff';
+        context.textAlign = 'center';
+        context.textBaseline = 'middle';
+
+        const text =
+          count === 0
+            ? '✓'
+            : count > 99
+              ? '99+'
+              : String(count);
+
+        context.font =
+          'bold ' +
+          (text.length >= 3 ? 26 : text.length === 2 ? 36 : 44) +
+          'px Arial';
+
+        context.fillText(text, size / 2, size / 2 + 3);
+
+        let link = document.querySelector('link[rel="icon"]');
+
+        if (!link) {
+          link = document.createElement('link');
+          link.rel = 'icon';
+          document.head.appendChild(link);
+        }
+
+        link.href = canvas.toDataURL('image/png');
+      } catch (error) {
+        console.log('分頁圖示更新失敗：', error);
+      }
+    }
+
+
+    /* ========================================
+       桌面通知
+       ======================================== */
+
+    function notificationState() {
+      if (!('Notification' in window)) {
+        return 'unsupported';
+      }
+
+      return Notification.permission;
+    }
+
+
+    function updateNotifyButton() {
+      const button = document.getElementById('notifyButton');
+      const state = notificationState();
+
+      button.className = '';
+
+      if (state === 'granted') {
+        button.textContent = '✓ 桌面通知已啟用';
+        button.className = 'ok';
+      } else if (state === 'denied') {
+        button.textContent = '桌面通知被封鎖（點此看解法）';
+        button.className = 'primary';
+      } else if (state === 'unsupported') {
+        button.textContent = '此瀏覽器不支援桌面通知';
+      } else {
+        button.textContent = '🔔 啟用桌面通知';
+        button.className = 'primary';
+      }
+    }
+
+
+    function enableNotification() {
+      const state = notificationState();
+
+      if (state === 'granted') {
+        showDesktopNotification(
+          '桌面通知測試',
+          '看到這則訊息，代表桌面通知已可正常運作。',
+          'test'
+        );
+
+        return;
+      }
+
+      if (state === 'denied') {
+        alert(
+          '瀏覽器目前封鎖了此頁面的通知。\n\n' +
+          '請點網址列左側的圖示 →「網站設定」→ 將「通知」改為「允許」，再重新整理頁面。'
+        );
+
+        return;
+      }
+
+      if (state === 'unsupported') {
+        return;
+      }
+
+      Notification.requestPermission().then(function() {
+        updateNotifyButton();
+
+        if (Notification.permission === 'granted') {
+          showDesktopNotification(
+            '桌面通知已啟用',
+            '之後有新詢價或逾時案件時，會在這裡通知您。',
+            'test'
+          );
+        }
+      });
+    }
+
+
+    function showDesktopNotification(title, body, tag) {
+      if (notificationState() !== 'granted') {
+        return;
+      }
+
+      try {
+        const notification = new Notification(title, {
+          body: body,
+          tag: 'lineAssignment-' + tag,
+          renotify: true,
+          // 逾時通知需手動關閉，不會自己消失
+          requireInteraction: tag === 'overdue'
+        });
+
+        notification.onclick = function() {
+          window.focus();
+          notification.close();
+        };
+      } catch (error) {
+        console.log('桌面通知顯示失敗：', error);
+      }
+    }
+
+
+    /* ========================================
+       啟動
+       ======================================== */
+
+    (function() {
+      const url = readUrl();
+
+      if (isValidUrl(url)) {
+        start(url);
+      } else {
+        document.getElementById('setup').style.display = 'block';
+      }
+    })();
+
+  </script>
+
+</body>
+
+</html>
