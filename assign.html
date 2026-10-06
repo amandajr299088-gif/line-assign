@@ -721,7 +721,7 @@
       }
 
       documentPictureInPicture
-        .requestWindow({ width: 300, height: 190 })
+        .requestWindow({ width: 320, height: 150 })
         .then(function(opened) {
           pipWindow = opened;
 
@@ -751,62 +751,97 @@
         html, body { height: 100%; margin: 0; }
 
         body {
+          --flash: #bfdbfe;
+
           display: flex;
           flex-direction: column;
-          align-items: center;
           justify-content: center;
-          gap: 4px;
+          gap: 8px;
           padding: 10px;
           box-sizing: border-box;
           text-align: center;
           font-family: Arial, "Microsoft JhengHei", sans-serif;
-          color: white;
-          background: #475569;
-          transition: background 0.2s;
+          color: #172033;
+          background: white;
+          cursor: pointer;
+          user-select: none;
         }
 
-        body.clear { background: #059669; }
-        body.normal { background: #2563eb; }
-        body.warning { background: #b45309; }
-        body.danger { background: #dc2626; }
+        body.danger { --flash: #fecaca; }
 
         body.flash { animation: flash 1s steps(1) infinite; }
 
         @keyframes flash {
-          50% { background: #111827; }
+          50% { background: var(--flash); }
         }
 
-        #big { font-size: 54px; font-weight: 800; line-height: 1; }
-        #text { font-size: 14px; font-weight: 700; }
-        #alert { font-size: 15px; font-weight: 800; min-height: 20px; }
-
-        button {
-          margin-top: 4px;
-          border: 0;
-          border-radius: 8px;
-          padding: 7px 16px;
-          font-size: 13px;
+        #message {
+          font-size: 14px;
           font-weight: 800;
-          font-family: inherit;
-          cursor: pointer;
-          background: white;
-          color: #172033;
+          min-height: 18px;
+          color: #64748b;
         }
+
+        body.clear #message { color: #059669; }
+        body.normal #message { color: #1d4ed8; }
+        body.warning #message { color: #92400e; }
+        body.danger #message { color: #dc2626; }
+
+        #tiles {
+          display: grid;
+          grid-template-columns: repeat(3, 1fr);
+          gap: 8px;
+        }
+
+        .tile {
+          border-radius: 10px;
+          padding: 9px 4px;
+          background: #f1f5f9;
+          color: #94a3b8;
+        }
+
+        .tile b {
+          display: block;
+          font-size: 34px;
+          line-height: 1.1;
+        }
+
+        .tile span {
+          font-size: 12px;
+          font-weight: 700;
+        }
+
+        #tileTotal.on { background: #dbeafe; color: #1d4ed8; }
+        #tileWarning.on { background: #fef3c7; color: #92400e; }
+        #tileOverdue.on { background: #dc2626; color: white; }
       `;
 
       doc.head.appendChild(style);
 
       doc.body.innerHTML = `
-        <div id="alert"></div>
-        <div id="big">…</div>
-        <div id="text"></div>
-        <button id="go">前往處理</button>
+        <div id="message"></div>
+        <div id="tiles">
+          <div id="tileTotal" class="tile"><b>0</b><span>待分派</span></div>
+          <div id="tileWarning" class="tile"><b>0</b><span>即將逾時</span></div>
+          <div id="tileOverdue" class="tile"><b>0</b><span>已逾時</span></div>
+        </div>
       `;
 
-      doc.getElementById('go').onclick = function() {
+      doc.body.title = '點一下回到待分派管理頁';
+
+      // 點視窗任一處即可回到管理頁
+      doc.body.onclick = function() {
         window.focus();
         stopFlash();
       };
+    }
+
+
+    function setPipTile(doc, id, count) {
+      const tile = doc.getElementById(id);
+
+      tile.querySelector('b').textContent = count;
+      tile.className = 'tile' + (count > 0 ? ' on' : '');
     }
 
 
@@ -819,32 +854,31 @@
       const status = lastStatus;
 
       let level = 'clear';
-      let big = '✓';
-      let text = '目前沒有待分派案件';
+      let message = '✓ 目前沒有待分派案件';
 
       if (!connected) {
         level = '';
-        big = '…';
-        text = '正在連線到管理頁';
+        message = '正在連線到管理頁…';
       } else if (status.overdue > 0) {
         level = 'danger';
-        big = String(status.total);
-        text = `筆待分派｜其中 ${status.overdue} 筆已逾時`;
+        message = `⚠ 有 ${status.overdue} 筆已逾時`;
       } else if (status.warning > 0) {
         level = 'warning';
-        big = String(status.total);
-        text = `筆待分派｜其中 ${status.warning} 筆即將逾時`;
+        message = `◷ 有 ${status.warning} 筆即將逾時`;
       } else if (status.total > 0) {
         level = 'normal';
-        big = String(status.total);
-        text = '筆待分派';
+        message = `有 ${status.total} 筆待分派`;
       }
 
       doc.body.className = level + (pipFlash ? ' flash' : '');
 
-      doc.getElementById('big').textContent = big;
-      doc.getElementById('text').textContent = text;
-      doc.getElementById('alert').textContent = pipFlash ? pipAlertText : '';
+      // 閃爍中顯示剛發生的事（例如「1 筆新詢價！」），否則顯示目前狀態
+      doc.getElementById('message').textContent =
+        pipFlash && pipAlertText ? pipAlertText : message;
+
+      setPipTile(doc, 'tileTotal', status.total);
+      setPipTile(doc, 'tileWarning', status.warning);
+      setPipTile(doc, 'tileOverdue', status.overdue);
     }
 
 
